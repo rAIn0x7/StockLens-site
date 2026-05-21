@@ -419,3 +419,100 @@ function _startSpyFallbackPoll() {
 
 window.loadHourlyChart = loadHourlyChart;
 window.initSpyWebSocket = initSpyWebSocket;
+
+/* ── CNN FEAR & GREED ── */
+async function loadFearGreed() {
+  const el = document.getElementById('fear-greed-block');
+  if (!el) return;
+  try {
+    const r = await fetch('https://production.dataviz.cnn.io/index/fearandgreed/graphdata');
+    const json = await r.json();
+    const fg = json?.fear_and_greed;
+    if (!fg) { el.style.display = 'none'; return; }
+
+    const val = Math.round(Number(fg.score));
+    if (!Number.isFinite(val)) { el.style.display = 'none'; return; }
+
+    const ZH_LABEL = { 'Extreme Fear':'极度恐慌', 'Fear':'恐慌', 'Neutral':'中立', 'Greed':'贪婪', 'Extreme Greed':'极度贪婪' };
+    const label = ZH_LABEL[fg.rating] || fg.rating || '';
+    const color = val < 25 ? '#ff4757' : val < 45 ? '#ffd32a' : val < 55 ? '#a29bfe' : val < 75 ? '#26de81' : '#00c896';
+    const yest = Math.round(Number(fg.previous_close));
+    const week = Math.round(Number(fg.previous_1_week));
+
+    el.style.display = 'block';
+    el.innerHTML = `
+      <div class="btc-meta" style="margin-bottom:0.4rem">恐贪指数</div>
+      <div style="display:flex;align-items:baseline;gap:0.5rem;margin-bottom:0.25rem">
+        <span style="font-family:var(--font-mono);font-size:1.3rem;font-weight:700;line-height:1;color:${color}">${val}</span>
+        <span style="font-size:0.65rem;color:${color};font-family:var(--font-mono);letter-spacing:0.06em">${escapeHtml(label)}</span>
+      </div>
+      <div class="fg-bar-wrap">
+        <div class="fg-bar" style="width:${val}%;background:linear-gradient(to right,#ff4757,#ffd32a 50%,#00c896)"></div>
+      </div>
+      <div class="fg-labels"><span>恐慌</span><span>中立</span><span>贪婪</span></div>
+      <div class="fg-history">昨日: ${Number.isFinite(yest) ? yest : '—'} · 上周: ${Number.isFinite(week) ? week : '—'}</div>`;
+  } catch { el.style.display = 'none'; }
+}
+
+/* ── PRICE SNAPSHOT SIDEBAR ── */
+const SNAPSHOT_SYMS = ['NVDA', 'TSLA', 'AAPL', 'PLTR', 'SPY'];
+const SNAPSHOT_META = { NVDA:'NVIDIA', TSLA:'Tesla', AAPL:'Apple', PLTR:'Palantir', SPY:'S&P 500' };
+
+function _sparkPoints(closes) {
+  if (!closes?.length) return '';
+  const min = Math.min(...closes), max = Math.max(...closes);
+  const range = max - min || 1;
+  return closes.map((p, i) => {
+    const x = (i / (closes.length - 1)) * 50;
+    const y = 18 - ((p - min) / range) * 16;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+}
+
+async function loadPriceSnapshot() {
+  const el = document.getElementById('price-snapshot-block');
+  if (!el) return;
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    const from = now - 3600;
+
+    const [quotesArr, candlesArr] = await Promise.all([
+      Promise.all(SNAPSHOT_SYMS.map(s =>
+        fetch(`https://finnhub.io/api/v1/quote?symbol=${s}&token=${FINNHUB_API_KEY}`).then(r => r.json())
+      )),
+      Promise.all(SNAPSHOT_SYMS.map(s =>
+        fetch(`https://finnhub.io/api/v1/stock/candle?symbol=${s}&resolution=5&from=${from}&to=${now}&token=${FINNHUB_API_KEY}`)
+          .then(r => r.json()).then(d => d.s === 'ok' ? d.c : [])
+      ))
+    ]);
+
+    const rows = SNAPSHOT_SYMS.map((sym, i) => {
+      const q   = quotesArr[i] || {};
+      const pts = _sparkPoints(candlesArr[i]);
+      const pct = q.dp ?? 0;
+      const up  = pct >= 0;
+      const color = up ? '#00c896' : '#ff4757';
+      const sign  = up ? '+' : '';
+      return `<div class="price-row">
+        <div>
+          <div class="pr-sym">${sym}</div>
+          <div class="pr-name">${SNAPSHOT_META[sym]}</div>
+        </div>
+        <svg class="pr-spark" viewBox="0 0 52 20" preserveAspectRatio="none">
+          ${pts ? `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linejoin="round"/>` : ''}
+        </svg>
+        <div>
+          <div class="pr-price">$${(q.c ?? 0).toFixed(2)}</div>
+          <div class="pr-chg" style="color:${color}">${sign}${pct.toFixed(2)}%</div>
+        </div>
+      </div>`;
+    }).join('');
+
+    el.innerHTML = `<div class="sidebar-title">Markets <span class="live-badge-sm">LIVE</span></div>${rows}`;
+    el.style.display = '';
+  } catch { el.style.display = 'none'; }
+  setTimeout(loadPriceSnapshot, 30000);
+}
+
+window.loadFearGreed = loadFearGreed;
+window.loadPriceSnapshot = loadPriceSnapshot;
