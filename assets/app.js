@@ -249,3 +249,173 @@ window.loadFeed = loadFeed;
 window.loadTodaysTop = loadTodaysTop;
 window.loadSidebarTags = loadSidebarTags;
 window.loadMarketPulse = loadMarketPulse;
+
+/* ── HOURLY CHART ── */
+function fmtK(p) {
+  return p >= 1000 ? '$' + (p / 1000).toFixed(1) + 'k' : '$' + p.toFixed(2);
+}
+
+function renderHourlyChart(closes) {
+  const W = 380, H = 88;
+  const PL = 4, PR = 44, PT = 12, PB = 8;
+  const plotW = W - PL - PR;
+  const plotH = H - PT - PB;
+  const min = Math.min(...closes);
+  const max = Math.max(...closes);
+  const pad = (max - min) * 0.15 || min * 0.005;
+  const lo = min - pad, hi = max + pad;
+  const scaleY = plotH / (hi - lo);
+  const toY = p => PT + plotH - (p - lo) * scaleY;
+  const n = closes.length;
+  const step = plotW / Math.max(n - 1, 1);
+  const pts = closes.map((p, i) => ({ x: PL + i * step, y: toY(p) }));
+  const pathD = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+  const fillD = pathD + ` L${pts[pts.length-1].x.toFixed(1)},${(PT+plotH).toFixed(1)} L${PL},${(PT+plotH).toFixed(1)} Z`;
+  const lx = pts[pts.length-1].x.toFixed(1);
+  const ly = pts[pts.length-1].y.toFixed(1);
+  const hiY = toY(max).toFixed(1);
+  const loY = toY(min).toFixed(1);
+  const ax = W - PR + 5;
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:88px;display:block">
+  <defs>
+    <linearGradient id="hg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#00c896" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="#00c896" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <line x1="${PL}" y1="${(PT+plotH*0.25).toFixed(1)}" x2="${W-PR}" y2="${(PT+plotH*0.25).toFixed(1)}" stroke="rgba(255,255,255,0.04)" stroke-dasharray="4,3"/>
+  <line x1="${PL}" y1="${(PT+plotH*0.60).toFixed(1)}" x2="${W-PR}" y2="${(PT+plotH*0.60).toFixed(1)}" stroke="rgba(255,255,255,0.04)" stroke-dasharray="4,3"/>
+  <line x1="${W-PR}" y1="${PT}" x2="${W-PR}" y2="${(PT+plotH).toFixed(1)}" stroke="rgba(0,200,150,0.12)" stroke-width="1"/>
+  <path d="${fillD}" fill="url(#hg)"/>
+  <path d="${pathD}" fill="none" stroke="#00c896" stroke-width="1.8" stroke-linejoin="round"/>
+  <circle cx="${lx}" cy="${ly}" r="3.5" fill="#00c896" stroke="rgba(0,0,0,0.5)" stroke-width="1.5"/>
+  <circle cx="${lx}" cy="${ly}" r="7" fill="none" stroke="#00c896" stroke-width="1" opacity="0.3"/>
+  <text x="${ax}" y="${(parseFloat(hiY)+8).toFixed(1)}" font-size="7" fill="rgba(0,200,150,0.65)" font-family="JetBrains Mono,monospace">${fmtK(max)}</text>
+  <text x="${ax}" y="${(parseFloat(loY)-2).toFixed(1)}" font-size="7" fill="rgba(0,200,150,0.45)" font-family="JetBrains Mono,monospace">${fmtK(min)}</text>
+</svg>`;
+}
+
+async function loadHourlyChart() {
+  const el = document.getElementById('btc-chart');
+  if (!el) return;
+  try {
+    const now  = Math.floor(Date.now() / 1000);
+    const from = now - 86400;
+    const url  = `https://finnhub.io/api/v1/stock/candle?symbol=SPY&resolution=60&from=${from}&to=${now}&token=${FINNHUB_API_KEY}`;
+    const r = await fetch(url);
+    const d = await r.json();
+    if (!d.c || d.s !== 'ok' || d.c.length < 2) return;
+
+    const sb = window.CL.supabase;
+    const { data: pulses } = await sb
+      .from('stock_pulses')
+      .select('sentiment_score, sentiment')
+      .order('created_at', { ascending: false })
+      .limit(12);
+
+    const COLOR = { bullish:'#00c896', bearish:'#ff4757', neutral:'#ffd32a', mixed:'#a29bfe' };
+    const band = pulses?.length ? '<div class="sent-band">' +
+      [...pulses].reverse().map(p => {
+        const c  = COLOR[p.sentiment] || '#ffd32a';
+        const op = Math.min(0.4 + Math.abs(p.sentiment_score || 0) / 100 * 0.6, 1.0).toFixed(2);
+        return `<div class="sb-seg" style="background:${c};opacity:${op}"></div>`;
+      }).join('') + '</div>' : '';
+
+    el.innerHTML = renderHourlyChart(d.c) + band +
+      `<div class="chart-foot"><span>24h ago</span><span style="color:rgba(255,255,255,0.1)">▓ sentiment</span><span>now</span></div>`;
+  } catch (e) {
+    console.warn('[loadHourlyChart]', e.message);
+  }
+  setTimeout(loadHourlyChart, 30 * 60 * 1000);
+}
+
+/* ── FINNHUB WEBSOCKET (SPY) ── */
+let _spyWs = null;
+let _spyRetries = 0;
+let _spyFallbackTimer = null;
+let _lastSpyPrice = null;
+
+function initSpyWebSocket() {
+  // Initial REST call so price/range show immediately before WS connects
+  fetch(`https://finnhub.io/api/v1/quote?symbol=SPY&token=${FINNHUB_API_KEY}`)
+    .then(r => r.json())
+    .then(d => {
+      if (d.c) {
+        updateSpyPrice(d.c, d.dp);
+        const rangeEl = document.getElementById('spy-range');
+        if (rangeEl && d.h && d.l)
+          rangeEl.textContent = `Day 低: $${d.l.toFixed(2)} · 高: $${d.h.toFixed(2)} · Prev: $${d.pc?.toFixed(2) ?? '—'}`;
+      }
+    }).catch(() => {});
+
+  if (_spyWs) { _spyWs.onclose = _spyWs.onerror = null; _spyWs.close(); _spyWs = null; }
+  _spyWs = new WebSocket(`wss://ws.finnhub.io?token=${FINNHUB_API_KEY}`);
+
+  _spyWs.onopen = () => {
+    _spyWs.send(JSON.stringify({ type: 'subscribe', symbol: 'SPY' }));
+    setLiveStatus(true);
+    _spyRetries = 0;
+    if (_spyFallbackTimer) { clearInterval(_spyFallbackTimer); _spyFallbackTimer = null; }
+  };
+
+  _spyWs.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type !== 'trade' || !msg.data) return;
+    const trade = msg.data[msg.data.length - 1];
+    updateSpyPrice(trade.p, null);
+  };
+
+  _spyWs.onclose = _spyWs.onerror = () => {
+    _spyWs.onclose = _spyWs.onerror = null;
+    _spyWs = null;
+    setLiveStatus(false);
+    if (_spyRetries < 10) { _spyRetries++; setTimeout(initSpyWebSocket, 3000); }
+    else { _startSpyFallbackPoll(); }
+  };
+}
+
+function setLiveStatus(live) {
+  const ring  = document.getElementById('live-ring');
+  const label = document.getElementById('live-status');
+  if (ring)  ring.style.background = live ? '#00c896' : 'rgba(255,255,255,0.2)';
+  if (label) label.textContent = live ? 'SPY · FINNHUB · LIVE' : 'SPY · FINNHUB · ~15s';
+}
+
+function updateSpyPrice(price, pct) {
+  const priceEl = document.getElementById('spy-price');
+  const chgEl   = document.getElementById('spy-chg');
+  if (!priceEl) return;
+
+  if (_lastSpyPrice !== null) {
+    priceEl.style.color = price > _lastSpyPrice ? '#00c896' : price < _lastSpyPrice ? '#ff4757' : '';
+    setTimeout(() => { if (priceEl) priceEl.style.color = ''; }, 800);
+  }
+  _lastSpyPrice = price;
+  priceEl.textContent = '$' + price.toFixed(2);
+
+  if (pct !== null && pct !== undefined) {
+    const sign = pct >= 0 ? '▲ +' : '▼ ';
+    if (chgEl) { chgEl.textContent = sign + Math.abs(pct).toFixed(2) + '%'; chgEl.style.color = pct >= 0 ? '#00c896' : '#ff4757'; }
+  }
+}
+
+function _startSpyFallbackPoll() {
+  if (_spyFallbackTimer) return;
+  async function poll() {
+    try {
+      const r = await fetch(`https://finnhub.io/api/v1/quote?symbol=SPY&token=${FINNHUB_API_KEY}`);
+      const d = await r.json();
+      if (d.c) {
+        updateSpyPrice(d.c, d.dp);
+        const rangeEl = document.getElementById('spy-range');
+        if (rangeEl && d.h && d.l)
+          rangeEl.textContent = `Day 低: $${d.l.toFixed(2)} · 高: $${d.h.toFixed(2)} · Prev: $${d.pc?.toFixed(2) ?? '—'}`;
+      }
+    } catch (e) { console.warn('[SPY poll]', e.message); }
+  }
+  poll();
+  _spyFallbackTimer = setInterval(poll, 15000);
+}
+
+window.loadHourlyChart = loadHourlyChart;
+window.initSpyWebSocket = initSpyWebSocket;
