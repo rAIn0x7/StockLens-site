@@ -26,7 +26,7 @@ function timeAgo(dateStr) {
 }
 
 function escapeHtml(s) {
-  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
 function renderEditorNote(article) {
@@ -113,7 +113,14 @@ async function loadFeed(reset) {
   if (currentTag) q = q.contains('tags', [currentTag]);
   q = q.range(currentOffset, currentOffset + PAGE_SIZE - 1);
 
-  const { data } = await q;
+  let data;
+  try {
+    const res = await q;
+    data = res.data;
+  } catch (e) {
+    isLoading = false;
+    return;
+  }
   isLoading = false;
 
   if (!data?.length) { hasMore = false; _hideLoadMore(); return; }
@@ -251,6 +258,7 @@ window.loadSidebarTags = loadSidebarTags;
 window.loadMarketPulse = loadMarketPulse;
 
 /* ── HOURLY CHART ── */
+let _hourlyChartTimer = null;
 function fmtK(p) {
   return p >= 1000 ? '$' + (p / 1000).toFixed(1) + 'k' : '$' + p.toFixed(2);
 }
@@ -326,7 +334,8 @@ async function loadHourlyChart() {
   } catch (e) {
     console.warn('[loadHourlyChart]', e.message);
   }
-  setTimeout(loadHourlyChart, 30 * 60 * 1000);
+  if (_hourlyChartTimer) clearTimeout(_hourlyChartTimer);
+  _hourlyChartTimer = setTimeout(loadHourlyChart, 30 * 60 * 1000);
 }
 
 /* ── FINNHUB WEBSOCKET (SPY) ── */
@@ -456,6 +465,7 @@ async function loadFearGreed() {
 
 /* ── PRICE SNAPSHOT SIDEBAR ── */
 const SNAPSHOT_SYMS = ['NVDA', 'TSLA', 'AAPL', 'PLTR', 'SPY'];
+let _priceSnapshotTimer = null;
 const SNAPSHOT_META = { NVDA:'NVIDIA', TSLA:'Tesla', AAPL:'Apple', PLTR:'Palantir', SPY:'S&P 500' };
 
 function _sparkPoints(closes) {
@@ -511,7 +521,8 @@ async function loadPriceSnapshot() {
     el.innerHTML = `<div class="sidebar-title">Markets <span class="live-badge-sm">LIVE</span></div>${rows}`;
     el.style.display = '';
   } catch { el.style.display = 'none'; }
-  setTimeout(loadPriceSnapshot, 30000);
+  if (_priceSnapshotTimer) clearTimeout(_priceSnapshotTimer);
+  _priceSnapshotTimer = setTimeout(loadPriceSnapshot, 30000);
 }
 
 window.loadFearGreed = loadFearGreed;
