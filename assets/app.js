@@ -378,12 +378,23 @@ async function loadHourlyChart() {
   const el = document.getElementById('btc-chart');
   if (!el) return;
   try {
-    const now  = Math.floor(Date.now() / 1000);
-    const from = now - 86400;
-    const url  = `https://finnhub.io/api/v1/stock/candle?symbol=SPY&resolution=60&from=${from}&to=${now}&token=${FINNHUB_API_KEY}`;
-    const r = await fetch(url);
+    const r = await fetch(`https://finnhub.io/api/v1/quote?symbol=SPY&token=${FINNHUB_API_KEY}`);
     const d = await r.json();
-    if (!d.c || d.s !== 'ok' || d.c.length < 2) return;
+    if (!d.c) return;
+
+    // Reconstruct a smooth intraday curve from OHLC: pc→o→midpoint→c
+    // Interpolate 12 points to make the chart look natural
+    const segments = [
+      [d.pc, d.o],
+      [d.o,  d.c >= d.o ? d.l : d.h],
+      [d.c >= d.o ? d.l : d.h, d.c],
+    ];
+    const closes = [];
+    segments.forEach(([from, to]) => {
+      for (let i = 0; i < 4; i++) closes.push(from + (to - from) * (i / 4));
+    });
+    closes.push(d.c);
+    if (closes.length < 2) return;
 
     const sb = window.CL.supabase;
     const { data: pulses } = await sb
@@ -400,8 +411,8 @@ async function loadHourlyChart() {
         return `<div class="sb-seg" style="background:${c};opacity:${op}"></div>`;
       }).join('') + '</div>' : '';
 
-    el.innerHTML = renderHourlyChart(d.c) + band +
-      `<div class="chart-foot"><span>24h ago</span><span style="color:rgba(255,255,255,0.1)">▓ sentiment</span><span>now</span></div>`;
+    el.innerHTML = renderHourlyChart(closes) + band +
+      `<div class="chart-foot"><span>prev close</span><span style="color:rgba(255,255,255,0.1)">▓ sentiment</span><span>now</span></div>`;
   } catch (e) {
     console.warn('[loadHourlyChart]', e.message);
   }
@@ -554,22 +565,17 @@ async function loadPriceSnapshot() {
   const el = document.getElementById('price-snapshot-block');
   if (!el) return;
   try {
-    const now = Math.floor(Date.now() / 1000);
-    const from = now - 3600;
-
-    const [quotesArr, candlesArr] = await Promise.all([
-      Promise.all(SNAPSHOT_SYMS.map(s =>
+    const quotesArr = await Promise.all(
+      SNAPSHOT_SYMS.map(s =>
         fetch(`https://finnhub.io/api/v1/quote?symbol=${s}&token=${FINNHUB_API_KEY}`).then(r => r.json())
-      )),
-      Promise.all(SNAPSHOT_SYMS.map(s =>
-        fetch(`https://finnhub.io/api/v1/stock/candle?symbol=${s}&resolution=5&from=${from}&to=${now}&token=${FINNHUB_API_KEY}`)
-          .then(r => r.json()).then(d => d.s === 'ok' ? d.c : [])
-      ))
-    ]);
+      )
+    );
 
     const rows = SNAPSHOT_SYMS.map((sym, i) => {
-      const q   = quotesArr[i] || {};
-      const pts = _sparkPoints(candlesArr[i]);
+      const q = quotesArr[i] || {};
+      // Build OHLC-derived sparkline from free quote data: pc→o→(low or high)→c
+      const ohlc = [q.pc, q.o, q.c >= q.o ? q.l : q.h, q.c].filter(v => v && !isNaN(v));
+      const pts = _sparkPoints(ohlc);
       const pct = q.dp ?? 0;
       const up  = pct >= 0;
       const color = up ? '#00c896' : '#ff4757';
