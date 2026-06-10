@@ -174,9 +174,15 @@ async function loadTodaysTop() {
   if (!data?.length) {
     ({ data } = await sb.from('stock_articles').select('*').order('importance_score', { ascending: false }).limit(4));
   }
+  // Honest freshness: stamp the NEWEST article's date, not today's
   const dateEl = document.getElementById('brief-date');
-  if (dateEl) dateEl.textContent = new Date().toLocaleDateString(
-    getLang() === 'zh' ? 'zh-CN' : 'en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+  if (dateEl) {
+    const newest = data?.length
+      ? new Date(Math.max(...data.map(a => +new Date(a.published_at || a.created_at))))
+      : new Date();
+    dateEl.textContent = newest.toLocaleDateString(
+      getLang() === 'zh' ? 'zh-CN' : 'en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+  }
   const container = document.getElementById('top-grid');
   if (!container) return;
   if (!data?.length) { container.closest('.brief-section')?.classList.add('hidden'); return; }
